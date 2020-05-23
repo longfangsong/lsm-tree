@@ -64,7 +64,7 @@ impl<K: Serialize + DeserializeOwned + Ord + Clone + Send + 'static, V: Serializ
         })
     }
 
-    fn compact_level(from: &Vec<SSTable<K, V>>, to: &mut SSTable<K, V>) {
+    fn compact_level(from: &[SSTable<K, V>], to: &mut SSTable<K, V>) {
         let mut remaining_files: Vec<_> = from.iter()
             .rev() // latest inserted file's index is the largest
             .map(|it| it.reader().into_iter().unwrap())
@@ -87,6 +87,7 @@ impl<K: Serialize + DeserializeOwned + Ord + Clone + Send + 'static, V: Serializ
 
     fn compact(self: Arc<Self>) {
         let mut unsorted = self.unsorted.write().unwrap();
+        unsorted.seek(SeekFrom::Start(0)).unwrap();
         let mut unsorted_content: BTreeMap<K, V> = BTreeMap::new();
         while let (Ok(k), Ok(v)) = (bincode::deserialize_from(unsorted.deref()), bincode::deserialize_from(unsorted.deref())) {
             unsorted_content.insert(k, v);
@@ -126,6 +127,13 @@ impl<K: Serialize + DeserializeOwned + Ord + Clone + Send + 'static, V: Serializ
                         .unwrap_or_else(|| "0".to_string())).unwrap();
                 Self::compact_level(&sorted_guard[level_id], &mut new_table);
                 sorted_guard[level_id + 1].push(new_table);
+                sorted_guard[level_id].clear();
+                for i in 0..COMPACT_FILE_LIMIT {
+                    fs::remove_dir_all(self.path
+                        .join(format!("{}", level_id))
+                        .join(format!("{}", i)))
+                        .unwrap();
+                }
             }
         }
     }
@@ -154,6 +162,9 @@ unsafe impl<K: Serialize + DeserializeOwned + Ord + Clone + Send, V: Serialize +
 mod tests {
     use crate::sstable::SSTable;
     use crate::LSMTree;
+    use std::sync::Arc;
+    use std::thread::sleep;
+    use std::{thread, time};
 
     #[test]
     fn test_compact_level() {
@@ -187,6 +198,26 @@ mod tests {
 
     #[test]
     fn test_compact() {
-        assert_eq!(true, false);
+        use tempfile;
+        use std::time;
+        use crate::LSMTreeExt;
+        let dir = tempfile::tempdir().unwrap();
+        for i in 0..9 {
+            let level0_path = dir.path().join("0");
+            let level0_file: SSTable<u64, u64> = SSTable::new(&level0_path, &format!("{}", i)).unwrap();
+            let mut writer = level0_file.writer();
+            for i in 0..65536 {
+                writer.append(i, i + 100 * i).unwrap();
+            }
+        }
+
+        let mut tree: Arc<LSMTree<u64, u64>> = Arc::new(LSMTree::new(dir.path()).unwrap());
+        assert_eq!(tree.sorted.read().unwrap()[0].len(), 9);
+        for i in 0..65536 {
+            tree.insert(i, i).unwrap();
+        }
+        thread::sleep(time::Duration::from_secs(1));
+        assert_eq!(tree.sorted.read().unwrap()[1].len(), 1);
+        assert_eq!(tree.sorted.read().unwrap()[0].len(), 0);
     }
 }
